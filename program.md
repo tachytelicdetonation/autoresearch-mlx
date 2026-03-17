@@ -20,6 +20,25 @@ To set up a new experiment, work with the user to:
 
 Once you get confirmation, kick off the experimentation.
 
+## Research phase
+
+Your training knowledge has a cutoff date. Use **web search** to find techniques published in 2026 that you cannot otherwise know about.
+
+**When to research:**
+- Once after establishing the baseline, before your first real experiment.
+- When progress stalls.
+
+**How to research:**
+1. Read `results.tsv` and current `train.py`. Identify what's limiting val_bpb — is it optimizer convergence, throughput, capacity, stability, overfitting, or something else?
+2. Web search for the latest 2026 advances targeting that bottleneck. Always include "2026" in your queries. Search across all areas: optimizers, architectures, normalization, activations, LR schedules, initialization, positional encodings, regularization, efficiency tricks.
+3. When you find something promising, find the GitHub repo or reference implementation and read the actual code — you need to port it to MLX, not copy PyTorch.
+4. Log a summary: `git commit --allow-empty -m "research: <what you found and plan to try>"`
+
+**Constraints:**
+- No new dependencies. Everything must be implementable from scratch using what's in `pyproject.toml`.
+- Skip anything that requires custom CUDA/Triton kernels. Prefer techniques that are pure matrix math.
+- Timebox research to ~5 minutes per session. You're here to experiment, not read.
+
 ## Experimentation
 
 Each experiment runs on Apple Silicon via MLX. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
@@ -110,6 +129,6 @@ The idea is that you are a completely autonomous researcher trying things out. I
 
 **Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
 
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
+**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — kick off a research phase, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
 
 As an example use case, a user might leave you running while they sleep. If each experiment takes you ~7 minutes then you can run approx 8-9/hour, for a total of about 70 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
