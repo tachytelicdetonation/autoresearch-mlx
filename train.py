@@ -258,11 +258,12 @@ class MuonAdamW:
     """Hybrid optimizer: Muon for 2D hidden-layer weights, AdamW for everything else."""
 
     def __init__(self, model, unembedding_lr, embedding_lr, matrix_lr, weight_decay, adam_betas, scalar_lr,
-                 muon_momentum=0.95):
+                 muon_momentum=0.95, normuon_beta2=0.999):
         self.param_config = {}
         self.adam_state = {}
         self.muon_state = {}
         self.muon_paths = set()
+        self.normuon_beta2 = normuon_beta2
 
         model_dim = model.config.n_embd
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -375,21 +376,28 @@ class MuonAdamW:
         wd = config["weight_decay"]
 
         if path not in self.muon_state:
-            self.muon_state[path] = {"buf": mx.zeros_like(grad_f32)}
+            m, n = grad_f32.shape
+            self.muon_state[path] = {
+                "buf": mx.zeros_like(grad_f32),
+                "v": mx.zeros((m,), dtype=mx.float32),  # NorMuon: row-wise second moment
+            }
 
-        buf = self.muon_state[path]["buf"]
-        buf = mu * buf + grad_f32
-        self.muon_state[path]["buf"] = buf
+        state = self.muon_state[path]
+        buf = mu * state["buf"] + grad_f32
+        state["buf"] = buf
 
         # Newton-Schulz orthogonalization
-        update = newton_schulz5(buf)
-        update = update.astype(mx.float32)
+        O = newton_schulz5(buf).astype(mx.float32)
 
-        # Scale: Muon scales by sqrt(m*n)/frobenius_norm but after NS5 the
-        # Frobenius norm is ~sqrt(m), so effective scale is ~sqrt(n).
-        # We just use lr directly — the lr hyperparameter absorbs this.
+        # NorMuon: neuron-wise normalization
+        row_mean_sq = mx.mean(O * O, axis=1)  # (m,)
+        beta2 = self.normuon_beta2
+        state["v"] = beta2 * state["v"] + (1 - beta2) * row_mean_sq
+        update = O / (mx.sqrt(state["v"])[:, None] + 1e-6)
+
+        # Adaptive LR scaling
         m, n = param.shape
-        scale = math.sqrt(max(m, n))
+        scale = 0.2 * math.sqrt(m * n) / (mx.sqrt(mx.sum(update * update)) + 1e-7)
 
         param_f32 = param_f32 * (1 - lr * wd)
         param_f32 = param_f32 - lr * scale * update
@@ -419,7 +427,7 @@ class MuonAdamW:
         for state in self.adam_state.values():
             arrays.extend([state["m"], state["v"]])
         for state in self.muon_state.values():
-            arrays.append(state["buf"])
+            arrays.extend([state["buf"], state["v"]])
         return arrays
 
 
