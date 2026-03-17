@@ -240,14 +240,21 @@ class GPT(nn.Module):
         return mx.sum(ce) / denom
 
 
+# Polar Express: optimal per-step coefficients (from upstream autoresearch)
+POLAR_EXPRESS_COEFFS = [
+    (8.156554524902461, -22.48329292557795, 15.878769915207462),
+    (4.042929935166739, -2.808917465908714, 0.5000178451051316),
+    (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
+    (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
+    (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
+]
+
 def newton_schulz5(G, steps=5):
-    """Compute the zeroth power / orthogonalization of G via Newton-Schulz iteration."""
+    """Polar Express orthogonalization with optimal per-step coefficients."""
     assert G.ndim == 2
-    a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.astype(mx.bfloat16)
-    # Normalize so spectral norm <= 1
     X = X / (mx.sqrt(mx.sum(X * X)) + 1e-7)
-    for _ in range(steps):
+    for a, b, c in POLAR_EXPRESS_COEFFS[:steps]:
         A = X @ X.T
         B = b * A + c * A @ A
         X = a * X + B @ X
