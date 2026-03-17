@@ -5,3 +5,4 @@ bc81e67	1.671829	5.8	keep	halve total batch size to 2^15 (more steps 379 vs 198)
 86a3e94	1.658866	5.9	keep	PoPE (Polar Positional Embedding) replacing RoPE
 b519033	1.642328	5.8	keep	reduce total batch size to 2^14 (756 steps)
 fc4ecc8	1.633649	5.8	keep	add 5% warmup ratio
+30cc6e7	1.629301	5.6	keep	SwiGLU activation replacing squared ReLU in MLP

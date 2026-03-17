@@ -121,13 +121,15 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        # SwiGLU: hidden_dim ~ 8/3 * n_embd, rounded to multiple of 64
+        hidden = int(8 / 3 * config.n_embd)
+        hidden = ((hidden + 63) // 64) * 64
+        self.c_fc = nn.Linear(config.n_embd, hidden, bias=False)
+        self.c_gate = nn.Linear(config.n_embd, hidden, bias=False)
+        self.c_proj = nn.Linear(hidden, config.n_embd, bias=False)
 
     def __call__(self, x):
-        x = self.c_fc(x)
-        x = mx.maximum(x, 0) ** 2
-        return self.c_proj(x)
+        return self.c_proj(nn.silu(self.c_gate(x)) * self.c_fc(x))
 
 
 class Block(nn.Module):
@@ -174,6 +176,7 @@ class GPT(nn.Module):
             block.attn.c_v.weight = mx.random.uniform(-scale, scale, block.attn.c_v.weight.shape).astype(mx.bfloat16)
             block.attn.c_proj.weight = mx.zeros_like(block.attn.c_proj.weight).astype(mx.bfloat16)
             block.mlp.c_fc.weight = mx.random.uniform(-scale, scale, block.mlp.c_fc.weight.shape).astype(mx.bfloat16)
+            block.mlp.c_gate.weight = mx.random.uniform(-scale, scale, block.mlp.c_gate.weight.shape).astype(mx.bfloat16)
             block.mlp.c_proj.weight = mx.zeros_like(block.mlp.c_proj.weight).astype(mx.bfloat16)
             if block.attn.ve_gate is not None:
                 block.attn.ve_gate.weight = mx.zeros_like(block.attn.ve_gate.weight).astype(mx.bfloat16)
