@@ -64,10 +64,12 @@ class CausalSelfAttention(nn.Module):
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
         self.head_dim = self.n_embd // self.n_head
+        self.pope_dim = self.head_dim // 2  # PoPE: half dims for magnitudes, expanded via cos/sin
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
-        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
-        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        # Q/K project to pope_dim per head (expanded to head_dim by PoPE)
+        self.c_q = nn.Linear(self.n_embd, self.n_head * self.pope_dim, bias=False)
+        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.pope_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 32
@@ -76,12 +78,14 @@ class CausalSelfAttention(nn.Module):
             if has_ve(layer_idx, config.n_layer)
             else None
         )
-        self.rope = nn.RoPE(self.head_dim, traditional=True, base=10000)
+        # PoPE frequencies: theta_c = base^(-c/d)
+        self._pope_freqs = 10000.0 ** (-mx.arange(self.pope_dim).astype(mx.float32) / self.pope_dim)
 
     def __call__(self, x, ve, mask):
         batch_size, seq_len, _ = x.shape
-        q = self.c_q(x).reshape(batch_size, seq_len, self.n_head, self.head_dim)
-        k = self.c_k(x).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
+        # Project Q/K to pope_dim, apply softplus for non-negative magnitudes
+        q_mag = nn.softplus(self.c_q(x).reshape(batch_size, seq_len, self.n_head, self.pope_dim))
+        k_mag = nn.softplus(self.c_k(x).reshape(batch_size, seq_len, self.n_kv_head, self.pope_dim))
         v = self.c_v(x).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
 
         if ve is not None and self.ve_gate is not None:
@@ -89,12 +93,24 @@ class CausalSelfAttention(nn.Module):
             gate = 2 * mx.sigmoid(self.ve_gate(x[..., : self.ve_gate_channels]))
             v = v + mx.expand_dims(gate, axis=-1) * ve
 
+        # PoPE: position phases
+        positions = mx.arange(seq_len).astype(mx.float32)
+        phases = positions[:, None] * self._pope_freqs[None, :]  # (seq, pope_dim)
+        cos_p = mx.cos(phases)
+        sin_p = mx.sin(phases)
+
+        # Expand magnitudes to head_dim via [mag*cos, mag*sin]
+        q = mx.concatenate([q_mag * cos_p[None, :, None, :],
+                            q_mag * sin_p[None, :, None, :]], axis=-1)
+        k = mx.concatenate([k_mag * cos_p[None, :, None, :],
+                            k_mag * sin_p[None, :, None, :]], axis=-1)
+
         q = q.transpose(0, 2, 1, 3)
         k = k.transpose(0, 2, 1, 3)
         v = v.transpose(0, 2, 1, 3)
 
-        q = norm(self.rope(q))
-        k = norm(self.rope(k))
+        q = norm(q)
+        k = norm(k)
 
         scale = 1.0 / math.sqrt(self.head_dim)
         y = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)
