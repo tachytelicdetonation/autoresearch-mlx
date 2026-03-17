@@ -258,7 +258,7 @@ class MuonAdamW:
     """Hybrid optimizer: Muon for 2D hidden-layer weights, AdamW for everything else."""
 
     def __init__(self, model, unembedding_lr, embedding_lr, matrix_lr, weight_decay, adam_betas, scalar_lr,
-                 muon_momentum=0.90, normuon_beta2=0.999):
+                 muon_momentum=0.85, normuon_beta2=0.999):
         self.param_config = {}
         self.adam_state = {}
         self.muon_state = {}

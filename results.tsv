@@ -11,3 +11,4 @@ fc4ecc8	1.633649	5.8	keep	add 5% warmup ratio
 5120403	1.416348	5.6	keep	increase embedding LR from 0.6 to 1.0
 02febce	1.406336	5.6	keep	Nesterov momentum for Muon (look-ahead before NS5)
 4bce0c1	1.394128	5.6	keep	reduce Muon momentum from 0.95 to 0.90
+412a837	1.392171	5.6	keep	reduce Muon momentum from 0.90 to 0.85
