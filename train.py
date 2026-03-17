@@ -221,10 +221,29 @@ class GPT(nn.Module):
         return mx.sum(ce) / denom
 
 
-class AdamW:
-    def __init__(self, model, unembedding_lr, embedding_lr, matrix_lr, weight_decay, adam_betas, scalar_lr):
+def newton_schulz5(G, steps=5):
+    """Compute the zeroth power / orthogonalization of G via Newton-Schulz iteration."""
+    assert G.ndim == 2
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    X = G.astype(mx.bfloat16)
+    # Normalize so spectral norm <= 1
+    X = X / (mx.sqrt(mx.sum(X * X)) + 1e-7)
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    return X
+
+
+class MuonAdamW:
+    """Hybrid optimizer: Muon for 2D hidden-layer weights, AdamW for everything else."""
+
+    def __init__(self, model, unembedding_lr, embedding_lr, matrix_lr, weight_decay, adam_betas, scalar_lr,
+                 muon_momentum=0.95):
         self.param_config = {}
         self.adam_state = {}
+        self.muon_state = {}
+        self.muon_paths = set()
 
         model_dim = model.config.n_embd
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -232,10 +251,11 @@ class AdamW:
         flat_params = tree_flatten(model.parameters())
         for path, param in flat_params:
             if "blocks" in path and param.ndim == 2:
+                # Muon for 2D hidden layer params
+                self.muon_paths.add(path)
                 self.param_config[path] = {
                     "lr": matrix_lr,
-                    "betas": adam_betas,
-                    "eps": 1e-10,
+                    "momentum": muon_momentum,
                     "weight_decay": weight_decay,
                 }
             elif "wte" in path:
@@ -299,7 +319,7 @@ class AdamW:
         else:
             setattr(obj, last, value)
 
-    def _step(self, path, grad, param, config):
+    def _adam_step(self, path, grad, param, config):
         grad_f32 = grad.astype(mx.float32)
         param_f32 = param.astype(mx.float32)
         lr = config["lr"]
@@ -328,6 +348,34 @@ class AdamW:
         param_f32 = param_f32 - step_size * (state["m"] / denom)
         return param_f32.astype(param.dtype)
 
+    def _muon_step(self, path, grad, param, config):
+        grad_f32 = grad.astype(mx.float32)
+        param_f32 = param.astype(mx.float32)
+        lr = config["lr"]
+        mu = config["momentum"]
+        wd = config["weight_decay"]
+
+        if path not in self.muon_state:
+            self.muon_state[path] = {"buf": mx.zeros_like(grad_f32)}
+
+        buf = self.muon_state[path]["buf"]
+        buf = mu * buf + grad_f32
+        self.muon_state[path]["buf"] = buf
+
+        # Newton-Schulz orthogonalization
+        update = newton_schulz5(buf)
+        update = update.astype(mx.float32)
+
+        # Scale: Muon scales by sqrt(m*n)/frobenius_norm but after NS5 the
+        # Frobenius norm is ~sqrt(m), so effective scale is ~sqrt(n).
+        # We just use lr directly — the lr hyperparameter absorbs this.
+        m, n = param.shape
+        scale = math.sqrt(max(m, n))
+
+        param_f32 = param_f32 * (1 - lr * wd)
+        param_f32 = param_f32 - lr * scale * update
+        return param_f32.astype(param.dtype)
+
     def update(self, model, grads):
         flat_grads = dict(tree_flatten(grads))
         flat_params = dict(tree_flatten(model.parameters()))
@@ -336,7 +384,10 @@ class AdamW:
                 continue
             config = self.param_config[path]
             param = flat_params[path]
-            new_param = self._step(path, grad, param, config)
+            if path in self.muon_paths:
+                new_param = self._muon_step(path, grad, param, config)
+            else:
+                new_param = self._adam_step(path, grad, param, config)
             self._set_path_value(model, path, new_param)
 
     def set_lr_multiplier(self, multiplier):
@@ -348,6 +399,8 @@ class AdamW:
         arrays = []
         for state in self.adam_state.values():
             arrays.extend([state["m"], state["v"]])
+        for state in self.muon_state.values():
+            arrays.append(state["buf"])
         return arrays
 
 
@@ -360,7 +413,6 @@ ASPECT_RATIO = 64
 HEAD_DIM = 128
 WINDOW_PATTERN = "SSSL"
 
-# v0.1: AdamW only. Muon port is future work.
 TOTAL_BATCH_SIZE = 2**16
 EMBEDDING_LR = 0.6
 UNEMBEDDING_LR = 0.004
@@ -418,7 +470,7 @@ tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
 
-optimizer = AdamW(
+optimizer = MuonAdamW(
     model,
     unembedding_lr=UNEMBEDDING_LR,
     embedding_lr=EMBEDDING_LR,
