@@ -1,3 +1,4 @@
 commit	val_bpb	memory_gb	status	description
 eec0b91	1.923455	5.9	keep	baseline (depth=4 device_batch=8 eval_batch=32)
 be83fff	1.724442	5.8	keep	Muon optimizer for 2D hidden layer params (Newton-Schulz orthogonalization)
+bc81e67	1.671829	5.8	keep	halve total batch size to 2^15 (more steps 379 vs 198)
