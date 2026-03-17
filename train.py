@@ -386,8 +386,11 @@ class MuonAdamW:
         buf = mu * state["buf"] + grad_f32
         state["buf"] = buf
 
+        # Nesterov momentum: look-ahead
+        nesterov_buf = mu * buf + grad_f32
+
         # Newton-Schulz orthogonalization
-        O = newton_schulz5(buf).astype(mx.float32)
+        O = newton_schulz5(nesterov_buf).astype(mx.float32)
 
         # NorMuon: neuron-wise normalization
         row_mean_sq = mx.mean(O * O, axis=1)  # (m,)

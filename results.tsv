@@ -9,3 +9,4 @@ fc4ecc8	1.633649	5.8	keep	add 5% warmup ratio
 9bf2cf7	1.429509	5.6	keep	NorMuon (neuron-wise normalized Muon) - massive improvement
 31b5ff6	1.425042	5.6	keep	increase warmdown ratio to 0.67
 5120403	1.416348	5.6	keep	increase embedding LR from 0.6 to 1.0
+02febce	1.406336	5.6	keep	Nesterov momentum for Muon (look-ahead before NS5)
