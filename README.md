@@ -46,17 +46,66 @@ The public `results.tsv` captures the initial hardware-local walk from the defau
 
 That result already shows the core Apple Silicon pattern: with a fixed 5-minute wall clock, smaller faster-training models can beat larger ones simply by fitting more optimizer steps into the budget.
 
+## mar17 run — M4 Pro 24 GB (1.923 → 1.392)
+
+A fully autonomous run on an M4 Pro MacBook Pro (24 GB unified memory). The agent ran 27 total experiments over ~3 hours, keeping 13 and discarding 14. The run used web search to discover and implement 2026 optimizer advances (Muon, NorMuon, PoPE) that were beyond the LLM's training cutoff.
+
+### Progression of kept experiments
+
+![Kept experiments progression](charts/progression.png)
+
+| # | Commit | val_bpb | Change | Category | Description |
+|---|--------|--------:|-------:|----------|-------------|
+| 0 | `eec0b91` | 1.923 | — | baseline | AdamW, RoPE, squared ReLU, depth=4 |
+| 1 | `be83fff` | 1.724 | **-0.199** | architecture | Muon optimizer (Newton-Schulz orthogonalization) |
+| 2 | `bc81e67` | 1.672 | -0.053 | hyperparameter | Halve total batch size to 2^15 |
+| 3 | `86a3e94` | 1.659 | -0.013 | architecture | PoPE (Polar Positional Embedding) replacing RoPE |
+| 4 | `b519033` | 1.642 | -0.017 | hyperparameter | Reduce total batch size to 2^14 |
+| 5 | `fc4ecc8` | 1.634 | -0.009 | hyperparameter | Add 5% warmup ratio |
+| 6 | `30cc6e7` | 1.629 | -0.004 | architecture | SwiGLU activation replacing squared ReLU |
+| 7 | `9bf2cf7` | 1.430 | **-0.200** | architecture | NorMuon (neuron-wise normalized Muon) |
+| 8 | `31b5ff6` | 1.425 | -0.004 | hyperparameter | Increase warmdown ratio to 0.67 |
+| 9 | `5120403` | 1.416 | -0.009 | hyperparameter | Increase embedding LR to 1.0 |
+| 10 | `02febce` | 1.406 | -0.010 | architecture | Nesterov momentum for Muon |
+| 11 | `4bce0c1` | 1.394 | -0.012 | hyperparameter | Reduce Muon momentum to 0.90 |
+| 12 | `412a837` | 1.392 | -0.002 | hyperparameter | Reduce Muon momentum to 0.85 |
+
+### All experiments — kept vs discarded
+
+![All experiments kept vs discarded](charts/all_experiments.png)
+
+Discarded experiments include: depth=8 (too slow), depth=6, batch 2^13 (too small), MLP 6x, matrix LR 0.08/0.06, AttnRes (Attention Residuals), weight decay 0.1, aspect ratio 96, HEAD_DIM 64, beta1 0.9, unembedding LR 0.01, NorMuon beta2 0.99, all-long attention, and removing value embeddings.
+
+### Architecture vs hyperparameter impact
+
+![Architecture vs hyperparameter impact](charts/arch_vs_hyper.png)
+
+**80% of the total improvement came from architecture/optimizer changes**, not hyperparameter tuning. The two largest single-experiment wins were Muon (-0.199) and NorMuon (-0.200), both optimizer architecture changes discovered via web search during the run. This suggests future autoresearch runs should prioritize architecture discovery over hyperparameter sweeps.
+
+### Accept/reject rates
+
+![Accept reject rates](charts/accept_reject.png)
+
+Architecture experiments had a **62% accept rate** (5 of 8) vs **37% for hyperparameters** (7 of 19). Architecture changes were both higher-impact and more likely to succeed.
+
+### Key techniques discovered
+
+- **Muon + NorMuon**: Newton-Schulz orthogonalization with neuron-wise normalization for hidden-layer weights. Combined with Nesterov momentum. Used AdamW for embeddings/scalars.
+- **PoPE**: Polar Coordinate Positional Embedding — decouples content and position in attention via softplus magnitudes and position-dependent cos/sin phases.
+- **SwiGLU**: Gated linear unit with SiLU activation in the MLP, replacing squared ReLU.
+
 ## Longer Apple Silicon runs
 
 Longer overnight runs on the working MLX port pushed much further. The long Mac Mini test is included here because it found a meaningfully different winner stack from the Max-class machines.
 
 | Machine | Current best | Starting point | Repeated wins |
 |---|---:|---:|---|
+| M4 Pro 24GB | 1.392171 | 1.923455 | NorMuon + Nesterov, PoPE, SwiGLU, lean batch, long warmdown |
 | M4 Max #1 | 1.294526 | 1.596971 | AdamW-only, low matrix LR, 3x MLP, no logit cap, moderate weight decay |
 | M4 Max #2 | 1.330509 | 1.807902 | leaner batch, long anneal, SiLU, lower regularization, no logit cap |
 | Mac Mini (long run) | 1.353329 | 1.922472 | Muon, sharper attention, smaller MLP, lower scalar LR |
 
-The Mac Mini result matters because it did not just rediscover the same exact recipe. On smaller Apple Silicon hardware, the strongest changes leaned toward more aggressive step-efficiency wins. Later transfer tests showed some of those Mac Mini findings did not carry cleanly onto the Max baseline, which is exactly the kind of hardware-specific behavior this loop is useful for uncovering.
+The M4 Pro result is notable for achieving a competitive val_bpb (1.392) on a 24 GB machine using only 5.6 GB of memory, leaving substantial headroom. The strongest changes came from optimizer architecture (Muon/NorMuon), not hyperparameter tuning — confirming that the biggest wins in fixed-budget training come from how you use your compute, not how much you have.
 
 ## Differences from upstream
 

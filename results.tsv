@@ -1,6 +1,14 @@
 commit	val_bpb	memory_gb	status	description
-383abb4	2.667000	26.9	keep	baseline (AdamW, default config)
-c67ad2a	2.695369	26.9	discard	lower weight decay to 0.1
-909dd59	2.588904	26.9	keep	halve total batch size to 2^16
-4161af3	2.533728	26.9	keep	increase matrix LR to 0.04
-5efc7aa	1.807902	20.7	keep	reduce depth from 8 to 4
+eec0b91	1.923455	5.9	keep	baseline (depth=4 device_batch=8 eval_batch=32)
+be83fff	1.724442	5.8	keep	Muon optimizer for 2D hidden layer params (Newton-Schulz orthogonalization)
+bc81e67	1.671829	5.8	keep	halve total batch size to 2^15 (more steps 379 vs 198)
+86a3e94	1.658866	5.9	keep	PoPE (Polar Positional Embedding) replacing RoPE
+b519033	1.642328	5.8	keep	reduce total batch size to 2^14 (756 steps)
+fc4ecc8	1.633649	5.8	keep	add 5% warmup ratio
+30cc6e7	1.629301	5.6	keep	SwiGLU activation replacing squared ReLU in MLP
+9bf2cf7	1.429509	5.6	keep	NorMuon (neuron-wise normalized Muon) - massive improvement
+31b5ff6	1.425042	5.6	keep	increase warmdown ratio to 0.67
+5120403	1.416348	5.6	keep	increase embedding LR from 0.6 to 1.0
+02febce	1.406336	5.6	keep	Nesterov momentum for Muon (look-ahead before NS5)
+4bce0c1	1.394128	5.6	keep	reduce Muon momentum from 0.95 to 0.90
+412a837	1.392171	5.6	keep	reduce Muon momentum from 0.90 to 0.85

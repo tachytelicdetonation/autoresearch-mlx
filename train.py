@@ -64,10 +64,12 @@ class CausalSelfAttention(nn.Module):
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
         self.head_dim = self.n_embd // self.n_head
+        self.pope_dim = self.head_dim // 2  # PoPE: half dims for magnitudes, expanded via cos/sin
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
-        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
-        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        # Q/K project to pope_dim per head (expanded to head_dim by PoPE)
+        self.c_q = nn.Linear(self.n_embd, self.n_head * self.pope_dim, bias=False)
+        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.pope_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 32
@@ -76,12 +78,14 @@ class CausalSelfAttention(nn.Module):
             if has_ve(layer_idx, config.n_layer)
             else None
         )
-        self.rope = nn.RoPE(self.head_dim, traditional=True, base=10000)
+        # PoPE frequencies: theta_c = base^(-c/d)
+        self._pope_freqs = 10000.0 ** (-mx.arange(self.pope_dim).astype(mx.float32) / self.pope_dim)
 
     def __call__(self, x, ve, mask):
         batch_size, seq_len, _ = x.shape
-        q = self.c_q(x).reshape(batch_size, seq_len, self.n_head, self.head_dim)
-        k = self.c_k(x).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
+        # Project Q/K to pope_dim, apply softplus for non-negative magnitudes
+        q_mag = nn.softplus(self.c_q(x).reshape(batch_size, seq_len, self.n_head, self.pope_dim))
+        k_mag = nn.softplus(self.c_k(x).reshape(batch_size, seq_len, self.n_kv_head, self.pope_dim))
         v = self.c_v(x).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
 
         if ve is not None and self.ve_gate is not None:
@@ -89,12 +93,24 @@ class CausalSelfAttention(nn.Module):
             gate = 2 * mx.sigmoid(self.ve_gate(x[..., : self.ve_gate_channels]))
             v = v + mx.expand_dims(gate, axis=-1) * ve
 
+        # PoPE: position phases
+        positions = mx.arange(seq_len).astype(mx.float32)
+        phases = positions[:, None] * self._pope_freqs[None, :]  # (seq, pope_dim)
+        cos_p = mx.cos(phases)
+        sin_p = mx.sin(phases)
+
+        # Expand magnitudes to head_dim via [mag*cos, mag*sin]
+        q = mx.concatenate([q_mag * cos_p[None, :, None, :],
+                            q_mag * sin_p[None, :, None, :]], axis=-1)
+        k = mx.concatenate([k_mag * cos_p[None, :, None, :],
+                            k_mag * sin_p[None, :, None, :]], axis=-1)
+
         q = q.transpose(0, 2, 1, 3)
         k = k.transpose(0, 2, 1, 3)
         v = v.transpose(0, 2, 1, 3)
 
-        q = norm(self.rope(q))
-        k = norm(self.rope(k))
+        q = norm(q)
+        k = norm(k)
 
         scale = 1.0 / math.sqrt(self.head_dim)
         y = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)
@@ -105,13 +121,15 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        # SwiGLU: hidden_dim ~ 8/3 * n_embd, rounded to multiple of 64
+        hidden = int(8 / 3 * config.n_embd)
+        hidden = ((hidden + 63) // 64) * 64
+        self.c_fc = nn.Linear(config.n_embd, hidden, bias=False)
+        self.c_gate = nn.Linear(config.n_embd, hidden, bias=False)
+        self.c_proj = nn.Linear(hidden, config.n_embd, bias=False)
 
     def __call__(self, x):
-        x = self.c_fc(x)
-        x = mx.maximum(x, 0) ** 2
-        return self.c_proj(x)
+        return self.c_proj(nn.silu(self.c_gate(x)) * self.c_fc(x))
 
 
 class Block(nn.Module):
@@ -158,6 +176,7 @@ class GPT(nn.Module):
             block.attn.c_v.weight = mx.random.uniform(-scale, scale, block.attn.c_v.weight.shape).astype(mx.bfloat16)
             block.attn.c_proj.weight = mx.zeros_like(block.attn.c_proj.weight).astype(mx.bfloat16)
             block.mlp.c_fc.weight = mx.random.uniform(-scale, scale, block.mlp.c_fc.weight.shape).astype(mx.bfloat16)
+            block.mlp.c_gate.weight = mx.random.uniform(-scale, scale, block.mlp.c_gate.weight.shape).astype(mx.bfloat16)
             block.mlp.c_proj.weight = mx.zeros_like(block.mlp.c_proj.weight).astype(mx.bfloat16)
             if block.attn.ve_gate is not None:
                 block.attn.ve_gate.weight = mx.zeros_like(block.attn.ve_gate.weight).astype(mx.bfloat16)
@@ -221,10 +240,30 @@ class GPT(nn.Module):
         return mx.sum(ce) / denom
 
 
-class AdamW:
-    def __init__(self, model, unembedding_lr, embedding_lr, matrix_lr, weight_decay, adam_betas, scalar_lr):
+def newton_schulz5(G, steps=5):
+    """Compute the zeroth power / orthogonalization of G via Newton-Schulz iteration."""
+    assert G.ndim == 2
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    X = G.astype(mx.bfloat16)
+    # Normalize so spectral norm <= 1
+    X = X / (mx.sqrt(mx.sum(X * X)) + 1e-7)
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    return X
+
+
+class MuonAdamW:
+    """Hybrid optimizer: Muon for 2D hidden-layer weights, AdamW for everything else."""
+
+    def __init__(self, model, unembedding_lr, embedding_lr, matrix_lr, weight_decay, adam_betas, scalar_lr,
+                 muon_momentum=0.85, normuon_beta2=0.999):
         self.param_config = {}
         self.adam_state = {}
+        self.muon_state = {}
+        self.muon_paths = set()
+        self.normuon_beta2 = normuon_beta2
 
         model_dim = model.config.n_embd
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -232,10 +271,11 @@ class AdamW:
         flat_params = tree_flatten(model.parameters())
         for path, param in flat_params:
             if "blocks" in path and param.ndim == 2:
+                # Muon for 2D hidden layer params
+                self.muon_paths.add(path)
                 self.param_config[path] = {
                     "lr": matrix_lr,
-                    "betas": adam_betas,
-                    "eps": 1e-10,
+                    "momentum": muon_momentum,
                     "weight_decay": weight_decay,
                 }
             elif "wte" in path:
@@ -299,7 +339,7 @@ class AdamW:
         else:
             setattr(obj, last, value)
 
-    def _step(self, path, grad, param, config):
+    def _adam_step(self, path, grad, param, config):
         grad_f32 = grad.astype(mx.float32)
         param_f32 = param.astype(mx.float32)
         lr = config["lr"]
@@ -328,6 +368,44 @@ class AdamW:
         param_f32 = param_f32 - step_size * (state["m"] / denom)
         return param_f32.astype(param.dtype)
 
+    def _muon_step(self, path, grad, param, config):
+        grad_f32 = grad.astype(mx.float32)
+        param_f32 = param.astype(mx.float32)
+        lr = config["lr"]
+        mu = config["momentum"]
+        wd = config["weight_decay"]
+
+        if path not in self.muon_state:
+            m, n = grad_f32.shape
+            self.muon_state[path] = {
+                "buf": mx.zeros_like(grad_f32),
+                "v": mx.zeros((m,), dtype=mx.float32),  # NorMuon: row-wise second moment
+            }
+
+        state = self.muon_state[path]
+        buf = mu * state["buf"] + grad_f32
+        state["buf"] = buf
+
+        # Nesterov momentum: look-ahead
+        nesterov_buf = mu * buf + grad_f32
+
+        # Newton-Schulz orthogonalization
+        O = newton_schulz5(nesterov_buf).astype(mx.float32)
+
+        # NorMuon: neuron-wise normalization
+        row_mean_sq = mx.mean(O * O, axis=1)  # (m,)
+        beta2 = self.normuon_beta2
+        state["v"] = beta2 * state["v"] + (1 - beta2) * row_mean_sq
+        update = O / (mx.sqrt(state["v"])[:, None] + 1e-6)
+
+        # Adaptive LR scaling
+        m, n = param.shape
+        scale = 0.2 * math.sqrt(m * n) / (mx.sqrt(mx.sum(update * update)) + 1e-7)
+
+        param_f32 = param_f32 * (1 - lr * wd)
+        param_f32 = param_f32 - lr * scale * update
+        return param_f32.astype(param.dtype)
+
     def update(self, model, grads):
         flat_grads = dict(tree_flatten(grads))
         flat_params = dict(tree_flatten(model.parameters()))
@@ -336,7 +414,10 @@ class AdamW:
                 continue
             config = self.param_config[path]
             param = flat_params[path]
-            new_param = self._step(path, grad, param, config)
+            if path in self.muon_paths:
+                new_param = self._muon_step(path, grad, param, config)
+            else:
+                new_param = self._adam_step(path, grad, param, config)
             self._set_path_value(model, path, new_param)
 
     def set_lr_multiplier(self, multiplier):
@@ -348,6 +429,8 @@ class AdamW:
         arrays = []
         for state in self.adam_state.values():
             arrays.extend([state["m"], state["v"]])
+        for state in self.muon_state.values():
+            arrays.extend([state["buf"], state["v"]])
         return arrays
 
 
@@ -360,22 +443,21 @@ ASPECT_RATIO = 64
 HEAD_DIM = 128
 WINDOW_PATTERN = "SSSL"
 
-# v0.1: AdamW only. Muon port is future work.
-TOTAL_BATCH_SIZE = 2**16
-EMBEDDING_LR = 0.6
+TOTAL_BATCH_SIZE = 2**14
+EMBEDDING_LR = 1.0
 UNEMBEDDING_LR = 0.004
 MATRIX_LR = 0.04
 SCALAR_LR = 0.5
 WEIGHT_DECAY = 0.2
 ADAM_BETAS = (0.8, 0.95)
-WARMUP_RATIO = 0.0
-WARMDOWN_RATIO = 0.5
+WARMUP_RATIO = 0.05
+WARMDOWN_RATIO = 0.67
 FINAL_LR_FRAC = 0.0
 
 # Model size
 DEPTH = 4
-DEVICE_BATCH_SIZE = 16
-FINAL_EVAL_BATCH_SIZE = 256
+DEVICE_BATCH_SIZE = 8
+FINAL_EVAL_BATCH_SIZE = 32
 STARTUP_EXCLUDE_STEPS = 1
 
 
@@ -418,7 +500,7 @@ tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
 
-optimizer = AdamW(
+optimizer = MuonAdamW(
     model,
     unembedding_lr=UNEMBEDDING_LR,
     embedding_lr=EMBEDDING_LR,
