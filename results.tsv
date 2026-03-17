@@ -1,3 +1,4 @@
 commit	val_bpb	memory_gb	status	description
 baseline	1.387866	5.6	keep	baseline (NorMuon+Nesterov, PoPE, SwiGLU, depth=4, n_embd=256)
 4f58ead	1.386971	5.6	keep	Polar Express coefficients (optimal per-step NS iteration)
+63b60c2	1.380859	5.6	keep	cautious weight decay (only decay when grad*param >= 0)

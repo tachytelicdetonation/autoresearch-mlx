@@ -409,7 +409,9 @@ class MuonAdamW:
         m, n = param.shape
         scale = 0.2 * math.sqrt(m * n) / (mx.sqrt(mx.sum(update * update)) + 1e-7)
 
-        param_f32 = param_f32 * (1 - lr * wd)
+        # Cautious weight decay: only decay when gradient aligns with parameter
+        wd_mask = (grad_f32 * param_f32) >= 0
+        param_f32 = param_f32 - lr * wd * param_f32 * wd_mask
         param_f32 = param_f32 - lr * scale * update
         return param_f32.astype(param.dtype)
 
