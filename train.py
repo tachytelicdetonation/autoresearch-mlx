@@ -463,6 +463,11 @@ WARMUP_RATIO = 0.05
 WARMDOWN_RATIO = 0.67
 FINAL_LR_FRAC = 0.0
 
+# Training budget (overrides time-based budget from prepare.py)
+MAX_STEPS = 300        # Hard cap on training steps
+MAX_TIMEOUT = 600      # Wall-clock timeout in seconds (10 min)
+MAX_PARAMS = 15_000_000  # Hard cap on model parameters
+
 # Model size
 DEPTH = 4
 DEVICE_BATCH_SIZE = 8
@@ -504,6 +509,7 @@ model = GPT(config)
 model.init_weights()
 mx.eval(model.parameters())
 num_params = sum(param.size for _, param in tree_flatten(model.parameters()))
+assert num_params <= MAX_PARAMS, f"Model has {num_params:,} params, exceeds {MAX_PARAMS:,} limit"
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
@@ -588,6 +594,11 @@ while True:
         gc.collect()
 
     step += 1
+    if step >= MAX_STEPS:
+        break
+    if (time.time() - t_start) >= MAX_TIMEOUT:
+        print("\nWall-clock timeout reached")
+        break
     if step >= STARTUP_EXCLUDE_STEPS and total_training_time >= TIME_BUDGET:
         break
 
