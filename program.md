@@ -21,15 +21,16 @@ Work with the user to:
 
 1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar17-arch`). The branch `autoresearch/<tag>` must not already exist.
 2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**:
+3. **Protect files from git reset**: Run `git rm --cached program.md results.tsv research_journal.md 2>/dev/null; git commit -m "setup: untrack protected files for experiment branch"`. This ensures these files survive `git reset --hard` during the experiment loop. They're already in `.gitignore`.
+4. **Read the in-scope files**:
    - `README.md` — repository context
    - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. **Read-only, never modify.**
    - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-4. **Verify training budget**: Confirm `train.py` has `MAX_STEPS = 300`, `MAX_TIMEOUT = 600`, and `MAX_PARAMS = 15_000_000`. If not, add them.
-5. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-6. **Run baseline**: `uv run train.py > run.log 2>&1`. This establishes YOUR baseline on this hardware. Do NOT use baseline numbers from other platforms.
-7. **Initialize results.tsv**: Create with header and baseline entry.
-8. **Create research_journal.md**: Initialize with the architecture canvas (see Section 8) and a constraint analysis based on the baseline results.
+5. **Verify training budget**: Confirm `train.py` has `MAX_STEPS = 300`, `MAX_TIMEOUT = 600`, and `MAX_PARAMS = 15_000_000`. If not, add them.
+6. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
+7. **Run baseline**: `uv run train.py > run.log 2>&1`. This establishes YOUR baseline on this hardware. Do NOT use baseline numbers from other platforms.
+8. **Initialize results.tsv**: Create with header and baseline entry.
+9. **Create research_journal.md**: Initialize with the architecture canvas (see Section 8) and a constraint analysis based on the baseline results.
 
 **Training dynamics analysis** — after the baseline run, analyze `run.log` to understand timing:
 > - What is `TIME_BUDGET` from prepare.py? (grep for it in the log or read prepare.py)
