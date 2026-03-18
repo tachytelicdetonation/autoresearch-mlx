@@ -150,10 +150,12 @@ class GPT(nn.Module):
         self.config = config
         self.window_sizes = self._compute_window_sizes(config)
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
+        self.n_recycles = 2  # run blocks this many times
         self.blocks = [Block(config, i) for i in range(config.n_layer)]
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.resid_lambdas = mx.ones((config.n_layer,), dtype=mx.float32)
-        self.x0_lambdas = mx.zeros((config.n_layer,), dtype=mx.float32)
+        effective_layers = config.n_layer * self.n_recycles
+        self.resid_lambdas = mx.ones((effective_layers,), dtype=mx.float32)
+        self.x0_lambdas = mx.zeros((effective_layers,), dtype=mx.float32)
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
         self.value_embeds = {
@@ -181,8 +183,9 @@ class GPT(nn.Module):
             if block.attn.ve_gate is not None:
                 block.attn.ve_gate.weight = mx.zeros_like(block.attn.ve_gate.weight).astype(mx.bfloat16)
 
-        self.resid_lambdas = mx.ones((self.config.n_layer,), dtype=mx.float32)
-        self.x0_lambdas = mx.full((self.config.n_layer,), 0.1, dtype=mx.float32)
+        effective_layers = self.config.n_layer * self.n_recycles
+        self.resid_lambdas = mx.ones((effective_layers,), dtype=mx.float32)
+        self.x0_lambdas = mx.full((effective_layers,), 0.1, dtype=mx.float32)
 
         for ve in self.value_embeds.values():
             ve.weight = mx.random.uniform(-scale, scale, ve.weight.shape).astype(mx.bfloat16)
@@ -218,10 +221,13 @@ class GPT(nn.Module):
         x = self.wte(idx)
         x = norm(x)
         x0 = x
-        for i, block in enumerate(self.blocks):
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            x = block(x, ve, masks[i])
+        layer_counter = 0
+        for _recycle in range(self.n_recycles):
+            for i, block in enumerate(self.blocks):
+                x = self.resid_lambdas[layer_counter] * x + self.x0_lambdas[layer_counter] * x0
+                ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
+                x = block(x, ve, masks[i])
+                layer_counter += 1
         x = norm(x)
 
         logits = self.lm_head(x).astype(mx.float32)

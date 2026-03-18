@@ -1,2 +1,4 @@
 commit	val_bpb	memory_gb	steps	status	failure_class	description
 2399009	1.589717	5.6	300	keep	NONE	baseline (NorMuon+Nesterov, PoPE, SwiGLU, depth=4, 256d, 300-step budget)
+51bf8a8	1.719980	5.5	300	discard	QUALITY_LOSS	remove all VE (VE is load-bearing, 7.1M params too few)
+338b13a	1.562473	8.5	300	keep	NONE	layer recycling x2 (8 effective layers, 0 extra params)
