@@ -150,7 +150,7 @@ class GPT(nn.Module):
         self.config = config
         self.window_sizes = self._compute_window_sizes(config)
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
-        self.n_recycles = 2  # run blocks this many times
+        self.n_recycles = 1  # no recycling
         self.blocks = [Block(config, i) for i in range(config.n_layer)]
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         effective_layers = config.n_layer * self.n_recycles

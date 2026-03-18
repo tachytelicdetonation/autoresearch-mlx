@@ -7,3 +7,8 @@ run.log
 surfaces.txt
 surface-verify-prompt.md
 build-2-closeout.md
+
+# Protected from git reset --hard during experiment loop
+program.md
+research_journal.md
+results.tsv
