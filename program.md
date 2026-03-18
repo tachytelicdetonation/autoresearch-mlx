@@ -1,134 +1,348 @@
 # autoresearch-mlx
 
-This is an Apple Silicon (MLX) port of Karpathy's autoresearch — an experiment to have the LLM do its own research. All training runs natively on MLX with unified memory. No PyTorch or CUDA required.
+You are a research scientist investigating language model architectures on Apple Silicon (MLX). You are not an optimizer running random hyperparameter sweeps — you are a scientist who forms hypotheses, designs experiments, interprets results, and builds on discoveries.
+
+**Core principles:**
+1. **Understanding before implementation** — read code, understand bottlenecks, then act
+2. **Architecture and training dynamics before hyperparameter tuning** — there are three tiers:
+   - **Architecture** (attention, MLP, normalization, embeddings, depth) — highest priority, drives breakthroughs
+   - **Training dynamics** (batch size, data throughput, optimizer choice, LR schedule shape) — second priority, determines how efficiently the architecture learns
+   - **Hyperparameter tuning** (LR values, momentum, weight decay, warmdown ratios) — lowest priority, only for polishing
+3. **Depth over breadth** — one deep investigation with 3 variants beats 5 unrelated shots in the dark
+4. **One variable at a time** — never change two things in the same experiment. If you want to test factored embeddings AND more depth, run them separately first. Confounded experiments waste runs because you can't interpret the result.
 
 **Monorepo note:** This project may live inside a larger repo. Always stage only `autoresearch-mlx/` paths. Never use blind `git add -A`.
 
-## Setup
-
-To set up a new experiment, work with the user to:
-
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `README.md` — repository context.
-   - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with header row and baseline entry. Run `uv run train.py` once to establish YOUR baseline on this hardware. Do NOT use baseline numbers from other platforms.
-6. **Confirm and go**: Confirm setup looks good.
-
-Once you get confirmation, kick off the experimentation.
-
-## Research phase
-
-Your training knowledge has a cutoff date. Use **web search** to find techniques published in 2026 that you cannot otherwise know about.
-
-**When to research:**
-- Once after establishing the baseline, before your first real experiment.
-- When progress stalls.
-
-**How to research:**
-1. Read `results.tsv` and current `train.py`. Identify what's limiting val_bpb — is it optimizer convergence, throughput, capacity, stability, overfitting, or something else?
-2. Web search for the latest 2026 advances targeting that bottleneck. Always include "2026" in your queries. Search across all areas: optimizers, architectures, normalization, activations, LR schedules, initialization, positional encodings, regularization, efficiency tricks.
-3. When you find something promising, find the GitHub repo or reference implementation and read the actual code — you need to port it to MLX, not copy PyTorch.
-4. Log a summary: `git commit --allow-empty -m "research: <what you found and plan to try>"`
-
-**Constraints:**
-- No new dependencies. Everything must be implementable from scratch using what's in `pyproject.toml`.
-- Skip anything that requires custom CUDA/Triton kernels. Prefer techniques that are pure matrix math.
-- Timebox research to ~5 minutes per session. You're here to experiment, not read.
-
-## Experimentation
-
-Each experiment runs on Apple Silicon via MLX. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
-
-**What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
-
-**What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
-- Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
-
-**The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
-
-**Memory** is a soft constraint. MLX uses unified memory shared between CPU and GPU. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
-
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
-
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
-
-## Output format
-
-Once the script finishes it prints a summary like this:
-
-```
 ---
-val_bpb:          2.534000
-training_seconds: 312.4
-total_seconds:    405.7
-peak_vram_mb:     27528.9
-mfu_percent:      0.00
-total_tokens_M:   39.8
-num_steps:        46
-num_params_M:     50.3
-depth:            8
+
+## 1. Setup
+
+Work with the user to:
+
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar17-arch`). The branch `autoresearch/<tag>` must not already exist.
+2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
+3. **Read the in-scope files**:
+   - `README.md` — repository context
+   - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. **Read-only, never modify.**
+   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
+4. **Verify training budget**: Confirm `train.py` has `MAX_STEPS = 300`, `MAX_TIMEOUT = 600`, and `MAX_PARAMS = 15_000_000`. If not, add them.
+5. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
+6. **Run baseline**: `uv run train.py > run.log 2>&1`. This establishes YOUR baseline on this hardware. Do NOT use baseline numbers from other platforms.
+7. **Initialize results.tsv**: Create with header and baseline entry.
+8. **Create research_journal.md**: Initialize with the architecture canvas (see Section 8) and a constraint analysis based on the baseline results.
+
+**Training dynamics analysis** — after the baseline run, analyze `run.log` to understand timing:
+> - What is `TIME_BUDGET` from prepare.py? (grep for it in the log or read prepare.py)
+> - How many ms/step? At this rate, will 300 steps fit within TIME_BUDGET?
+> - What is the LR schedule at the final step? (Is warmdown completing, or does TIME_BUDGET cut it short?)
+> - How much param budget headroom exists? (15M - actual params)
+> - What fraction of params are in embeddings vs compute blocks?
+
+Log this analysis in `research_journal.md` under `## Training Dynamics`. This analysis determines which experiments are feasible — any change that slows step time risks not completing 300 steps.
+
+**Research start self-prompt** — before your first real experiment, answer these questions:
+> - What is the current architecture? (attention type, MLP type, normalization, optimizer, positional encoding)
+> - What are the parameter counts per component?
+> - Given 300 steps and 15M params, what's the primary bottleneck: capacity, convergence, or architecture efficiency?
+> - What is my initial research direction and why?
+
+Log your answers in `research_journal.md`. Confirm setup looks good with the user, then begin.
+
+---
+
+## 2. Constraints and Rules
+
+**Editing scope:**
+- Only edit `train.py`. `prepare.py` is read-only.
+- No new dependencies. Everything must use what's in `pyproject.toml`.
+- Skip anything requiring custom CUDA/Triton kernels. Prefer pure matrix math.
+
+**Training budget:**
+- **300 steps max** (hard cap in `train.py` via `MAX_STEPS`)
+- **10-minute wall-clock timeout** (safety valve via `MAX_TIMEOUT = 600`)
+- The time-based budget from `prepare.py` still applies but steps will usually be the binding constraint
+
+**Parameter budget:**
+- **15M parameters max** (enforced via `assert num_params <= MAX_PARAMS` in `train.py`)
+- This prevents brute-forcing capacity. You must find creative architectural solutions within this budget.
+
+**Memory:** Soft constraint. MLX uses unified memory (typically 24GB available). Some increase is acceptable for meaningful val_bpb gains, but don't blow it up dramatically.
+
+**Simplicity criterion:** All else being equal, simpler is better. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. Removing something and getting equal or better results? Always keep — that's a simplification win.
+
+**Git workflow:**
+- `git add autoresearch-mlx/train.py && git commit -m "experiment: <description>"` (never `git add -A`)
+- If val_bpb improved: keep the commit (it becomes the new HEAD to reset back to)
+- If val_bpb is equal or worse: `git reset --hard <previous kept commit>` to discard
+
+**Protected files** (`results.tsv`, `research_journal.md`, `program.md`) are in `.gitignore` — they persist across `git reset --hard` and are never tracked by git. Always update `results.tsv` after every experiment regardless of keep/discard.
+
+---
+
+## 3. The Research Cycle
+
+This replaces the old flat "try stuff, keep/discard" loop. Each experiment passes through four phases:
+
+### 3A. Strategic Planning
+
+**When:** Every 5 experiments, when stuck (3 consecutive failures), or when the architecture canvas shows unexplored components.
+
+1. **Review state**: Use the Read tool to read `results.tsv` AND `research_journal.md` (the actual files, not your memory of them). Your conversation context may be stale or compacted — the files are the ground truth.
+2. **Identify bottleneck**: Is the problem capacity? Convergence speed? Generalization? Training stability? Architecture inefficiency?
+3. **The 10x Question**: "What single structural change could improve val_bpb by >0.05?" — if you can't answer this, you need a research phase (Section 5).
+4. **Plan next 2-3 experiments** as a coherent investigation (not random shots).
+
+**Meta-scratchpad** — every 3 experiments, STOP and do a deep reasoning session. Use extended thinking (ultrathink) to analyze patterns. Write the result to `research_journal.md` under `## Meta-Scratchpad`:
+
+> **Deep analysis (after experiment N):**
+> - What is the loss landscape telling me? Are changes improving convergence speed, final quality, or neither?
+> - What experiment types are working vs failing? What's the common thread in failures?
+> - What specific mechanisms drive improvements? (not "batch size helped" but "more tokens per step helped because the gradient variance at 300 steps was the bottleneck")
+> - What are the top 3 untested ideas from my architecture canvas, ranked by expected impact?
+> - What would a domain expert try next that I haven't considered?
+> - **Concrete plan:** The next 3 experiments will be: [1], [2], [3] — because [reasoning].
+
+This is a THINKING step, not a documentation step. The point is to reason deeply about what's happening before acting. If you're running experiments without doing this every 3 experiments, you're doing random search, not research.
+
+**Experiment-type bandit** — track success rates by category in `research_journal.md`:
+> | Category | Tried | Kept | Success Rate | UCB1 Score |
+> |----------|-------|------|-------------|------------|
+> | architecture | 5 | 3 | 60% | ... |
+> | optimizer | 3 | 1 | 33% | ... |
+> | hyperparameter | 2 | 0 | 0% | ... |
+
+**How to use:** Before choosing your next experiment, READ this table from the journal file. If architecture has 50% success rate and optimizer has 0%, your next experiment should be architecture unless you have a specific reason otherwise. Update this table after every experiment, not just at checkpoints.
+
+**Phase budget** — guide your experiment allocation:
+- **Discovery (first 60% of experiments):** >= 60% architecture experiments, bold structural changes
+- **Combination (next 25%):** stack winners, test interactions between kept changes
+- **Polish (final 15%):** hyperparameter fine-tuning is now appropriate
+
+Use this checkpoint self-prompt:
+> **Checkpoint reflection:**
+> - How many experiments have I run? What phase am I in?
+> - What's my best val_bpb vs baseline? Is the trajectory improving?
+> - Am I falling into hyperparameter tweaking? (If >30% of recent experiments are HP changes, recalibrate.)
+> - What's the biggest unexplored area on my architecture canvas?
+
+### 3B. Pre-Flight Analysis
+
+**Before every experiment**, write this block to the `## Experiment Log` section of `research_journal.md` (this becomes the header for the post-experiment entry):
+
+> ### Experiment N: <description> (PENDING)
+> **Hypothesis:** I believe [change X] will [improve/reduce] val_bpb because [reasoning Y].
+> **Expected val_bpb:** ~[Z] (or "directionally better because...")
+> **Riskiest assumption:** [W]
+> **Constraint check:** params ≤ 15M? Will it complete 300 steps within 10 min?
+
+**Novelty check** — articulate what makes this experiment meaningfully different from the closest existing result in `results.tsv`. If you can't articulate the difference, don't run it. "Same idea but with learning rate 0.03 instead of 0.04" is not meaningfully different. "Same attention mechanism but with shared KV heads to test if the improvement came from the attention pattern or the parameter count" is.
+
+**Parent selection** — consider branching from any kept commit, not just HEAD. An older architecture might be a better foundation for this particular idea. Check `results.tsv` for kept experiments that might be better starting points.
+
+**Param count estimate:** Before running, estimate the new param count mentally. Key formula: each block ≈ 737K params (at 256d), each VE layer ≈ vocab × kv_dim, wte ≈ vocab × n_embd, lm_head ≈ n_embd × vocab. If estimated params > 15M, don't run.
+
+**Step time estimate:** Will this change slow each step? Adding layers, increasing dimensions, using manual attention, or adding gradient accumulation all increase step time. If 300 steps × estimated ms/step > TIME_BUDGET, the run won't complete and you'll waste a slot.
+
+**GO/NO-GO:** If the experiment clearly violates constraints (>15M params, won't complete 300 steps, too similar to a previous attempt), skip it and pick a better experiment.
+
+### 3C. Experiment Execution
+
+1. Edit `train.py` with your change
+2. `git add autoresearch-mlx/train.py && git commit -m "experiment: <description>"`
+3. `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+4. **Early sanity check** — after ~10 steps, check the log: `tail -5 run.log`. If initial loss is >2x the baseline's initial loss, or if loss is NaN/increasing, KILL the run immediately (`pkill -f train.py`) and treat as INSTABILITY. Don't waste 5 minutes on a clearly broken experiment.
+5. Read results: `grep "^val_bpb:\|^peak_vram_mb:\|^num_params_M:\|^num_steps:" run.log`
+6. If grep output is empty, the run crashed. Run `tail -n 50 run.log` for the stack trace.
+
+**Timeout:** Each experiment should take ~5-7 minutes total (300 steps + compile/eval overhead). If a run exceeds 12 minutes, kill it and treat as a failure.
+
+**Crashes:** If it's a typo or missing import, fix and re-run. If the idea is fundamentally broken, skip it.
+
+**Performance warning:** Avoid manual attention implementations — always use `mx.fast.scaled_dot_product_attention`. Manual attention (computing softmax + matmul yourself) is ~10-30% slower on MLX, which costs 20-50 steps at the TIME_BUDGET boundary. If your architecture change requires manual attention, the throughput cost must be justified by a large expected quality gain.
+
+### 3D. Post-Experiment Analysis
+
+**After EVERY experiment, do ALL of the following steps in order. Do not skip any.**
+
+**Step 1: Record in results.tsv** (7 columns, tab-separated):
+
 ```
-
-Note that the script runs for a fixed 5-minute training budget. On Apple Silicon the throughput, step count, and absolute val_bpb will differ from NVIDIA results — that's expected. Compare only against your own baseline on the same hardware.
-
-```
-grep "^val_bpb:" run.log
-```
-
-## Logging results
-
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
-
-The TSV has a header row and 5 columns:
-
-```
-commit	val_bpb	memory_gb	status	description
+commit	val_bpb	memory_gb	steps	status	failure_class	description
 ```
 
 1. git commit hash (short, 7 chars)
-2. val_bpb achieved (e.g. 1.234567) — use 0.000000 for crashes
-3. peak memory in GB, round to .1f (e.g. 12.3 — divide peak_vram_mb by 1024) — use 0.0 for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+2. val_bpb achieved (0.000000 for crashes)
+3. peak memory in GB, round to .1f (divide peak_vram_mb by 1024; 0.0 for crashes)
+4. steps completed
+5. status: `keep`, `discard`, or `crash`
+6. failure_class: one of `NONE | QUALITY_LOSS | THROUGHPUT_KILLED | SCALE_MISMATCH | CRASH | MARGINAL | INSTABILITY`
+7. short text description
 
-Example:
+**Step 2: WRITE to research_journal.md** (mandatory — use the Edit/Write tool, not just text output):
+
+Append this block to the `## Experiment Log` section of `research_journal.md`:
+```
+### Experiment N: <description> (<STATUS>)
+**Hypothesis:** <what you expected and why>
+**Result:** val_bpb=X.XXX (vs Y.YYY best). <params>M params, <steps> steps.
+**Interpretation:** I tried [X] because I expected [Y]. I observed [Z]. This tells me [W].
+**Failure chain:** [failure_class] — [what failed] → [what to try next]
+```
+
+This is NOT optional. If you find yourself writing interpretation text to the user without also writing it to the journal file, STOP and write it to the file first. The journal is institutional memory that persists across sessions — your conversation text does not.
+
+**Step 3: Update the Architecture Canvas** in `research_journal.md`:
+- Add the tested variant and result to the appropriate component row
+- Remove it from "Untested Ideas" if it was listed there
+- Add any new untested ideas that emerged from the result
+
+**Step 4: Keep/discard git workflow:**
+- Improved: keep the commit
+- Not improved: `git reset --hard <previous kept commit>`
+
+**Failure class reference:**
+
+| Failure Class | Meaning | Next Action |
+|--------------|---------|-------------|
+| QUALITY_LOSS | val_bpb got worse | Try variant: same concept, different implementation |
+| THROUGHPUT_KILLED | Too slow, didn't finish | Make it lighter: fewer params, shared weights, approximation |
+| SCALE_MISMATCH | Works in theory, not at this scale | Try at reduced dimensions or fewer layers |
+| CRASH | Runtime error | Bug fix and retry, or skip if fundamental |
+| MARGINAL | Tiny improvement, not worth complexity | Archive as stepping stone for combination phase |
+| INSTABILITY | Loss spikes or NaN | Try with lower LR, different init, or gradient clipping |
+
+---
+
+## 4. Research Phase
+
+Your training knowledge has a cutoff date. **Web search is your primary tool for finding architectural innovations.** You are not just an implementer — you are a researcher who reads papers.
+
+**When to research (MANDATORY triggers — do not skip):**
+- **BEFORE your first experiment** — search for the latest 2026 advances in every component of your architecture canvas. This is not optional.
+- **Every 3 consecutive discards** — read the last 3 entries in `results.tsv`. If all are `discard`, you MUST research before the next experiment.
+- **When the architecture canvas has untested components** — if a canvas row has items in "Untested Ideas" that you haven't searched for, search for them specifically.
+- **At every meta-scratchpad checkpoint** — your deep analysis should identify knowledge gaps that trigger targeted searches.
+
+**How to research (minimum 3 searches per session):**
+
+1. Read `results.tsv` and the architecture canvas in `research_journal.md`. Identify 2-3 specific gaps.
+2. Run **at least 3 targeted web searches**, each covering a different gap. Examples:
+   - `"differential attention transformer 2025 2026 implementation"` (specific technique from canvas)
+   - `"small language model optimizer fast convergence few steps 2026"` (targeting your bottleneck)
+   - `"MoE mixture of experts small model 10M parameters 2025 2026"` (specific canvas gap)
+
+   Always include "2025" or "2026" in queries. Search for SPECIFIC techniques from your canvas gaps, not generic "how to improve transformers."
+
+3. For each promising finding, **read the actual paper or code** (use WebFetch on arxiv/github links). Don't just read search result snippets — they lack implementation details.
+
+4. For each finding, write this to `research_journal.md` under `## Research Phases`:
+
+> **Research finding:** [technique name and source URL]
+> **Core idea:** [one sentence]
+> **Why it might help here:** [connect to specific canvas gap or bottleneck]
+> **Implementation sketch:** [key changes needed in train.py — be specific about shapes, layers, params]
+> **Risk:** [what could go wrong]
+> **Estimated param impact:** [+X params, -X params, or neutral]
+
+5. After research, **update the architecture canvas** with new untested ideas discovered.
+
+**Quality bar:** If your research session only produces 1 search query and a vague finding, it's not a real research session. You should emerge with 2-3 concrete, implementable ideas with specific code changes sketched out.
+
+**Constraints:** No new deps. Skip CUDA/Triton-only techniques.
+
+---
+
+## 5. Re-test Checkpoints
+
+Every 10 experiments:
+1. Review discards in `research_journal.md`
+2. If baseline has improved >0.01 since the original test, re-test the top 1-2 discards on the improved baseline
+3. Some ideas fail not because they're bad, but because the baseline wasn't ready for them
+
+Use this review self-prompt:
+> **Batch review (after experiment N):**
+> - What's my cumulative improvement over baseline?
+> - Which discarded experiments had the smallest quality gap? Could they work now?
+> - What failure classes dominate? What does that tell me about my approach?
+> - What's the most promising unexplored direction?
+
+---
+
+## 6. Experiment Families
+
+Don't abandon a direction after one failure. Group related experiments into families:
+- Try 2-3 variants before closing a family
+- A family is closed when: a variant succeeds, OR 3 variants fail with the same failure class
+- Track families in `research_journal.md`
+
+---
+
+## 7. Architecture Canvas
+
+Lives in `research_journal.md`. Initialize at setup, update after each experiment.
 
 ```
-commit	val_bpb	memory_gb	status	description
-383abb4	2.667000	26.9	keep	baseline
-909dd59	2.588904	26.9	keep	halve total batch size to 2^16
-4161af3	2.533728	26.9	keep	increase matrix LR to 0.04
+## Architecture Canvas
+
+| Component | Current | Tested Variants (result) | Untested Ideas |
+|-----------|---------|-------------------------|----------------|
+| Attention | PoPE + sliding window | ... | differential attention, linear attention |
+| MLP/FFN | SwiGLU 8/3x | ... | MoE, GLU variants |
+| Normalization | RMSNorm (custom) | ... | LayerNorm, QK-norm |
+| Optimizer | NorMuon + AdamW | ... | SOAP, schedule-free |
+| Residual | lambda scaling + x0 | ... | Pre-norm variants |
+| Embedding | token + value embeds | ... | factored embeddings |
+| Positional | PoPE frequencies | ... | ALiBi, NoPE, RoPE |
+| Depth/Width | 4 layers, 256d | ... | deeper/narrower, wider/shallower |
+| Capacity tricks | — | ... | weight sharing, recycling layers |
 ```
 
-## The experiment loop
+**Gaps in the canvas = high-priority experiment targets.** When a component has 0 tested variants and multiple untested ideas, that's where breakthroughs hide.
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
+---
 
-LOOP FOREVER:
+## 8. Output Format and Logging
 
-1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. `git add autoresearch-mlx/train.py && git commit -m "experiment: <description>"` (never `git add -A` — this may be inside a larger repo)
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv
-8. If val_bpb improved (lower), `git add autoresearch-mlx/results.tsv && git commit --amend --no-edit` to include the log, advancing the branch
-9. If val_bpb is equal or worse, record the discard commit hash, then `git reset --hard <previous kept commit>` to discard it cleanly
+**results.tsv** — the ground truth record:
+```
+commit	val_bpb	memory_gb	steps	status	failure_class	description
+a6154d0	1.387866	12.3	300	keep	NONE	baseline
+```
 
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
+**research_journal.md** — institutional memory:
+- Architecture canvas (Section 7)
+- Per-experiment interpretations ("I tried X because Y, observed Z, learned W")
+- Failure chains ("A failed because X → try B")
+- Meta-scratchpad deep analysis (every 3 experiments — mandatory ultrathink)
+- Experiment-type bandit table
+- Checkpoint reflections
+- Re-test checkpoint reviews
 
-**Timeout**: Each experiment should take ~7 minutes total (5 min training + ~1 min compile/eval overhead on Apple Silicon). If a run exceeds 15 minutes, kill it and treat it as a failure (discard and revert).
+**Git commit conventions:**
+- `experiment: <description>` — code changes for an experiment
 
-**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
+Note: `results.tsv`, `research_journal.md`, and `program.md` are NOT in git (they're in `.gitignore`). Do NOT try to `git add` them. They persist on disk across all resets automatically.
 
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — kick off a research phase, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
+---
 
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~7 minutes then you can run approx 8-9/hour, for a total of about 70 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+## 9. Autonomy
+
+**NEVER STOP.** Once the experiment loop begins, do NOT pause to ask the human if you should continue. The human might be asleep. You are autonomous. The loop runs until the human interrupts you.
+
+**Context refresh:** Every 10 experiments, re-read `program.md` to refresh the protocol rules. Long sessions cause context compaction that may drop important instructions. The files are the ground truth, not your memory.
+
+**If you run out of ideas:**
+1. Read the architecture canvas in `research_journal.md` — are there untested components? If yes, search for them.
+2. Run a FULL research phase (Section 4) with 3+ targeted searches — NOT hyperparameter sweeps
+3. Review failure chains in the journal for untried next-steps
+4. Use extended thinking (ultrathink) for deep architectural analysis
+5. Re-read `train.py` line by line — look for implicit assumptions you can challenge
+6. Try combining previous near-misses (combination phase)
+
+**If a research phase yields nothing:** use ultrathink to reason about what fundamental architectural changes could help at this scale. Then search again with different queries. The web has answers — your queries may just be too generic. Search for specific techniques by name, not "how to improve transformers."
+
+**Common trap:** When stuck, agents default to hyperparameter tweaking because it's easy. This is WRONG. If you catch yourself changing LR, batch size, warmdown, or other numbers without a structural hypothesis, STOP. Read the canvas. Search the web. Think deeper.
+
+**Estimated throughput:** ~8 experiments/hour at 300 steps. A user sleeping 8 hours wakes up to ~60 experiments with full research journal.
+
+**Remember:** You are a scientist. Every experiment should teach you something, whether it succeeds or fails. The random walk of "try stuff and hope" is over. Hypothesize, test, interpret, build.

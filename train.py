@@ -150,10 +150,12 @@ class GPT(nn.Module):
         self.config = config
         self.window_sizes = self._compute_window_sizes(config)
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
+        self.n_recycles = 1  # no recycling
         self.blocks = [Block(config, i) for i in range(config.n_layer)]
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.resid_lambdas = mx.ones((config.n_layer,), dtype=mx.float32)
-        self.x0_lambdas = mx.zeros((config.n_layer,), dtype=mx.float32)
+        effective_layers = config.n_layer * self.n_recycles
+        self.resid_lambdas = mx.ones((effective_layers,), dtype=mx.float32)
+        self.x0_lambdas = mx.zeros((effective_layers,), dtype=mx.float32)
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
         self.value_embeds = {
@@ -181,8 +183,9 @@ class GPT(nn.Module):
             if block.attn.ve_gate is not None:
                 block.attn.ve_gate.weight = mx.zeros_like(block.attn.ve_gate.weight).astype(mx.bfloat16)
 
-        self.resid_lambdas = mx.ones((self.config.n_layer,), dtype=mx.float32)
-        self.x0_lambdas = mx.full((self.config.n_layer,), 0.1, dtype=mx.float32)
+        effective_layers = self.config.n_layer * self.n_recycles
+        self.resid_lambdas = mx.ones((effective_layers,), dtype=mx.float32)
+        self.x0_lambdas = mx.full((effective_layers,), 0.1, dtype=mx.float32)
 
         for ve in self.value_embeds.values():
             ve.weight = mx.random.uniform(-scale, scale, ve.weight.shape).astype(mx.bfloat16)
@@ -218,10 +221,13 @@ class GPT(nn.Module):
         x = self.wte(idx)
         x = norm(x)
         x0 = x
-        for i, block in enumerate(self.blocks):
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            x = block(x, ve, masks[i])
+        layer_counter = 0
+        for _recycle in range(self.n_recycles):
+            for i, block in enumerate(self.blocks):
+                x = self.resid_lambdas[layer_counter] * x + self.x0_lambdas[layer_counter] * x0
+                ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
+                x = block(x, ve, masks[i])
+                layer_counter += 1
         x = norm(x)
 
         logits = self.lm_head(x).astype(mx.float32)
@@ -240,14 +246,21 @@ class GPT(nn.Module):
         return mx.sum(ce) / denom
 
 
+# Polar Express: optimal per-step coefficients (from upstream autoresearch)
+POLAR_EXPRESS_COEFFS = [
+    (8.156554524902461, -22.48329292557795, 15.878769915207462),
+    (4.042929935166739, -2.808917465908714, 0.5000178451051316),
+    (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
+    (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
+    (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
+]
+
 def newton_schulz5(G, steps=5):
-    """Compute the zeroth power / orthogonalization of G via Newton-Schulz iteration."""
+    """Polar Express orthogonalization with optimal per-step coefficients."""
     assert G.ndim == 2
-    a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.astype(mx.bfloat16)
-    # Normalize so spectral norm <= 1
     X = X / (mx.sqrt(mx.sum(X * X)) + 1e-7)
-    for _ in range(steps):
+    for a, b, c in POLAR_EXPRESS_COEFFS[:steps]:
         A = X @ X.T
         B = b * A + c * A @ A
         X = a * X + B @ X
@@ -402,7 +415,9 @@ class MuonAdamW:
         m, n = param.shape
         scale = 0.2 * math.sqrt(m * n) / (mx.sqrt(mx.sum(update * update)) + 1e-7)
 
-        param_f32 = param_f32 * (1 - lr * wd)
+        # Cautious weight decay: only decay when gradient aligns with parameter
+        wd_mask = (grad_f32 * param_f32) >= 0
+        param_f32 = param_f32 - lr * wd * param_f32 * wd_mask
         param_f32 = param_f32 - lr * scale * update
         return param_f32.astype(param.dtype)
 
@@ -441,9 +456,9 @@ class MuonAdamW:
 # Model architecture
 ASPECT_RATIO = 64
 HEAD_DIM = 128
-WINDOW_PATTERN = "SSSL"
+WINDOW_PATTERN = "LLLL"
 
-TOTAL_BATCH_SIZE = 2**14
+TOTAL_BATCH_SIZE = 2**15
 EMBEDDING_LR = 1.0
 UNEMBEDDING_LR = 0.004
 MATRIX_LR = 0.04
@@ -453,6 +468,11 @@ ADAM_BETAS = (0.8, 0.95)
 WARMUP_RATIO = 0.05
 WARMDOWN_RATIO = 0.67
 FINAL_LR_FRAC = 0.0
+
+# Training budget (overrides time-based budget from prepare.py)
+MAX_STEPS = 300        # Hard cap on training steps
+MAX_TIMEOUT = 600      # Wall-clock timeout in seconds (10 min)
+MAX_PARAMS = 15_000_000  # Hard cap on model parameters
 
 # Model size
 DEPTH = 4
@@ -495,6 +515,7 @@ model = GPT(config)
 model.init_weights()
 mx.eval(model.parameters())
 num_params = sum(param.size for _, param in tree_flatten(model.parameters()))
+assert num_params <= MAX_PARAMS, f"Model has {num_params:,} params, exceeds {MAX_PARAMS:,} limit"
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
@@ -579,6 +600,11 @@ while True:
         gc.collect()
 
     step += 1
+    if step >= MAX_STEPS:
+        break
+    if (time.time() - t_start) >= MAX_TIMEOUT:
+        print("\nWall-clock timeout reached")
+        break
     if step >= STARTUP_EXCLUDE_STEPS and total_training_time >= TIME_BUDGET:
         break
 
