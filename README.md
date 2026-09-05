@@ -1,5 +1,20 @@
 # autoresearch-mlx
 
+## This fork
+
+This repository builds on
+[trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx).
+The MLX port and its earlier results come from that upstream project. Work added
+here includes the March 17 optimizer and architecture experiments, result charts,
+and revisions to the experiment protocol.
+
+Read [the research journal](research_journal.md), [experiment records](results.tsv),
+and [protocol](program.md) alongside the results below. The experiment history
+includes both wall-clock budgets and later step/parameter constraints. Compare
+results within the same protocol, hardware, and evaluation setup; the tables do
+not establish a controlled ranking across machines. Recorded historical results
+are not a guarantee that the current default reproduces every experiment.
+
 Apple Silicon (MLX) port of [Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
 
 Full credit to [@karpathy](https://github.com/karpathy) for the core idea: fixed-time autonomous research loops controlled through `program.md`. This port keeps the same basic rules: one mutable `train.py`, one metric (`val_bpb`), a fixed 5-minute training budget, and keep-or-revert via git. It runs natively on Apple Silicon through [MLX](https://github.com/ml-explore/mlx), so there is no PyTorch or CUDA dependency.
